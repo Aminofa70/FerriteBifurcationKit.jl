@@ -1,9 +1,19 @@
 name = "FerriteBifurcationKit"
 uuid = "813f8696-2795-4669-aca4-b56c4084c5bd"
-authors = ["Aminofa70 <amin.alibakhshi@upm.es> and contributors"]
 version = "1.0.0-DEV"
+authors = ["Aminofa70 <amin.alibakhshi@upm.es> and contributors"]
+
+[deps]
+BifurcationKit = "0f109fa4-8a5d-4b75-95aa-f515264e7665"
+Comodo = "59095408-2761-4f7a-bdc2-044e78630271"
+ComodoFerrite = "4ccf3a29-4aa4-4027-a3be-f1f903a96b6c"
+Ferrite = "c061ca5d-56c9-439f-9c0e-210fe06d3992"
 
 [compat]
+BifurcationKit = "0.8.2"
+Comodo = "1.0.3"
+ComodoFerrite = "1.0.0"
+Ferrite = "1.6.0"
 julia = "1.10.10"
 
 [extras]
