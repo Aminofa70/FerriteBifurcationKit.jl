@@ -131,10 +131,10 @@ dh = create_dofhandler(grid)
 ch = create_bc(dh)
 K = allocate_matrix(dh)
 
-E = 1.0
+E_mod = 1.0
 ν = 0.4
-μ = E / (2 * (1 + ν))
-λ = (E * ν) / ((1 + ν) * (1 - 2ν))
+μ = E_mod / (2 * (1 + ν))
+λ = (E_mod * ν) / ((1 + ν) * (1 - 2ν))
 mp = NeoHooke(μ, λ)
 #=
 Parametrs for BifurcationKit.jl

@@ -11,18 +11,30 @@ GLMakie.closeall()
 #=
 Geometry and mesh using Comodo.jl
 =#
-boxDim = [10, 10, 10]
-boxEl = [10, 10, 10]
-E, V, F, Fb, Cb = hexbox(boxDim, boxEl)
+rOut = 5.0
+rIn = 4.5                   
+pointSpacing = 1.0
+E, V = hexspherehollow(rOut, rIn, pointSpacing)
 #=
 Connecting Comodo mesh to Ferrite Grid style using ComodoFerrite.jl
 Adding the faces from Comodo mesh to Ferrite
 =#
 grid = ComodoToFerrite(E, V)
-addface!(grid, "bottom", Fb[Cb .== 1])
-addface!(grid, "front", Fb[Cb .== 3])
-addface!(grid, "top", Fb[Cb .== 2])
-addface!(grid, "left", Fb[Cb .== 6])
+F = element2faces(E)
+Fb = boundaryfaces(element2faces(E))
+Fc = simplexcenter(Fb, V)
+rc = norm.(Fc)
+rmid = 0.5 * (rIn + rOut)
+
+addface!(grid, "inner", Fb[rc .< rmid])
+addface!(grid, "outer", Fb[rc .> rmid])
+#=
+Apply symmetric boundary condition to avoid rigid body motion
+=#
+tol = 1.0e-6 * rOut
+addnodeset!(grid, "symx", x -> abs(x[1]) < tol)
+addnodeset!(grid, "symy", x -> abs(x[2]) < tol)
+addnodeset!(grid, "symz", x -> abs(x[3]) < tol)
 #=
 Interpolation space for the shape functions
 Quadrature points
@@ -30,10 +42,12 @@ Quadrature points
 function create_values()
     order = 1
     dim = 3
-    ip = Lagrange{RefHexahedron,order}()^dim
+    ip = Lagrange{RefHexahedron, order}()^dim
     qr = QuadratureRule{RefHexahedron}(2)
-    cell_values = CellValues(qr, ip)
-    return cell_values
+    qr_face = FacetQuadratureRule{RefHexahedron}(2)
+    cv = CellValues(qr, ip)
+    fv = FacetValues(qr_face, ip)
+    return cv, fv
 end
 #=
 Deegrees of freedom
@@ -49,10 +63,9 @@ Dirichlet Boundary Condition
 =#
 function create_bc(dh)
     ch = Ferrite.ConstraintHandler(dh)
-    add!(ch, Dirichlet(:u, getfacetset(dh.grid, "bottom"), (x, t) -> [0.0], [3]))
-    add!(ch, Dirichlet(:u, getfacetset(dh.grid, "front"), (x, t) -> [0.0], [2]))
-    add!(ch, Dirichlet(:u, getfacetset(dh.grid, "left"), (x, t) -> [0.0], [1]))
-    add!(ch, Dirichlet(:u, getfacetset(dh.grid, "top"), (x, t) -> [t], [3]))
+    add!(ch, Dirichlet(:u, getnodeset(dh.grid, "symx"), (x, t) -> [0.0], [1]))
+    add!(ch, Dirichlet(:u, getnodeset(dh.grid, "symy"), (x, t) -> [0.0], [2]))
+    add!(ch, Dirichlet(:u, getnodeset(dh.grid, "symz"), (x, t) -> [0.0], [3]))
     Ferrite.close!(ch)
     Ferrite.update!(ch, 0.0)
     return ch
@@ -83,7 +96,7 @@ end
 #=
 Local assembling of residual and tangent stiffness
 =#
-function assemble_element!(ke, ge, cell, cv, mp, ue)
+function assemble_element!(ke, ge, cell, cv, fv, mp, ue, ΓN, pressure)
     reinit!(cv, cell)
     fill!(ke, 0.0)
     fill!(ge, 0.0)
@@ -107,11 +120,38 @@ function assemble_element!(ke, ge, cell, cv, mp, ue)
             end
         end
     end
+    # Follower traction on Neumann boundary
+    for facet in 1:nfacets(cell)
+        if FacetIndex(cellid(cell), facet) in ΓN
+            reinit!(fv, cell, facet)
+            for q_point in 1:getnquadpoints(fv)
+                ∇u = function_gradient(fv, q_point, ue)
+                F = one(∇u) + ∇u
+                J = det(F)
+                FinvT = inv(F)'
+                pressure_val = -pressure * getnormal(fv, q_point)
+                T0 = J * (FinvT ⋅ pressure_val)
+                dΓ0 = getdetJdV(fv, q_point)
+                for i in 1:ndofs
+                    δui = shape_value(fv, q_point, i)
+                    ge[i] -= (δui ⋅ T0) * dΓ0
+                    for j in 1:ndofs
+                        ∇δuj = shape_gradient(fv, q_point, j)
+                        δF = ∇δuj
+                        term1 = (FinvT ⊡ δF) * (FinvT ⋅ pressure_val)
+                        term2 = FinvT ⋅ (δF' ⋅ (FinvT ⋅ pressure_val))
+                        δT0 = J * (term1 - term2)
+                        ke[i, j] -= (δui ⋅ δT0) * dΓ0
+                    end
+                end
+            end
+        end
+    end
 end
 #=
 Global assembling of residual and tangent stiffness
 =#
-function assemble_global!(K, g, dh, cv, mp, u)
+function assemble_global!(K, g, dh, cv, fv, mp, u, ΓN, pressure)
     n = ndofs_per_cell(dh)
     ke = zeros(n, n)
     ge = zeros(n)
@@ -119,73 +159,60 @@ function assemble_global!(K, g, dh, cv, mp, u)
     for cell in CellIterator(dh)
         global_dofs = celldofs(cell)
         ue = u[global_dofs]
-        assemble_element!(ke, ge, cell, cv, mp, ue)
+        assemble_element!(ke, ge, cell, cv, fv, mp, ue, ΓN, pressure)
         assemble!(assembler, global_dofs, ke, ge)
     end
 end
 #=
 Finite Element values and material parameters
 =#
-cell_values = create_values()
+ΓN = getfacetset(grid, "inner")
+cv, fv = create_values()
 dh = create_dofhandler(grid)
 ch = create_bc(dh)
 K = allocate_matrix(dh)
+μ_mod = 1.0
+λ_mod = 50.0                 
+mp = NeoHooke(μ_mod, λ_mod)
 
-E_mod = 1.0
-ν = 0.4
-μ = E_mod / (2 * (1 + ν))
-λ = (E_mod * ν) / ((1 + ν) * (1 - 2ν))
-mp = NeoHooke(μ, λ)
 #=
 Parametrs for BifurcationKit.jl
 =#
-par = (mp=mp, dh=dh, cv=cell_values, ch=ch, K=K, t=0.0)
+par = (dh = dh, cv = cv, fv = fv, mp = mp, ch = ch, K = K, ΓN = ΓN, pressure = 0.0)
 #=
 Residual function for BifurcationKit.jl
 =#
 function Fres(u, p)
-    (; dh, cv, mp, ch, K, t) = p
+    (; dh, cv, fv, mp, ch, K, ΓN, pressure) = p
     g = zeros(eltype(u), ndofs(dh))
-    assemble_global!(K, g, dh, cv, mp, u)
-
-    Ferrite.update!(ch, t)
-    ū = zeros(ndofs(dh))
-    apply!(ū, ch)                       # ū[d] = prescribed value at this t
-
-    for d in ch.prescribed_dofs
-        g[d] = u[d] - ū[d]
-    end
+    assemble_global!(K, g, dh, cv, fv, mp, u, ΓN, pressure)
+    apply_zero!(g, ch)
     return g
 end
 #=
 Jacobian function for BifurcationKit.jl
 =#
 function Jac(u, p)
-    (; dh, cv, mp, ch, K) = p
+    (; dh, cv, fv, mp, ch, K, ΓN, pressure) = p
     g = zeros(eltype(u), ndofs(dh))
-    assemble_global!(K, g, dh, cv, mp, u)
-
-    for d in ch.prescribed_dofs
-        K[d, :] .= 0.0
-        K[d, d]  = 1.0
-    end
-    return copy(K)                    
+    assemble_global!(K, g, dh, cv, fv, mp, u, ΓN, pressure)
+    apply!(K, ch)
+    return copy(K)
 end
 #=
 BifurcationProblem  (parameter = t, the prescribed top displacement)
 =#
 u0 = zeros(ndofs(dh))
-prob = BifurcationProblem(Fres, u0, par, (@optic _.t);
+prob = BifurcationProblem(Fres, u0, par, (@optic _.pressure);
     J = Jac,
     record_from_solution = (x, p; k...) -> (nrm = norm(x), umax = maximum(abs, x)))
 
 @assert norm(Fres(u0, par)) < 1e-10 "u = 0 at t = 0 must be an exact solution"
 optnewton = NewtonPar(tol=1e-8, max_iterations=25, verbose=true,linsolver=DefaultLS())
 optcont = ContinuationPar(
-    p_min = 0., p_max = 1.0,        # range of the prescribed top displacement
-    ds    = 0.05,                   
-    dsmin = 1e-6, dsmax = 0.25,
-    max_steps = 300,
+    p_min = 0.0, p_max = 0.40,       
+    ds = 0.002, dsmin = 1.0e-9, dsmax = 0.02,
+    max_steps = 100,
     newton_options = optnewton,
     detect_bifurcation = 0,        
     save_sol_every_step = 1,    
@@ -206,6 +233,17 @@ for (k, s) in enumerate(br.sol)
     ut_mag_max[k] = maximum(UT_mag[k])
 end
 #=
+Define radial stretch
+=#
+r_ref = [norm(V[i]) for i in eachindex(V)] # reference radius of every node
+press   = [s.p for s in br.sol]            # pressure at each step
+stretch = Float64[]
+for s in br.sol
+    un    = vec(evaluate_at_grid_nodes(dh, s.x, :u))            # nodal displacements
+    r_def = [norm(V[i] .+ un[i]) for i in eachindex(V)]         # deformed radius
+    push!(stretch, maximum(r_def ./ r_ref))
+end
+#=
 plot the displacement using GLMakie and Comodo
 =#
 numInc = length(UT)
@@ -218,15 +256,24 @@ incRange = 0:(numInc - 1)
 fig = Figure(size = (800,600))
 stepStart = 1
 
-ax1 = AxisGeom(fig[1, 1], title = "Step: $stepStart", limits = (min_p[1], max_p[1], min_p[2], max_p[2], min_p[3], max_p[3]) )
-hp1 = meshplot!(ax1, Fb, VT[stepStart + 1]; strokewidth = 2, color = UT_mag[stepStart + 1], transparency = false, colormap = Reverse(:Spectral), colorrange = (0.0, maximum(ut_mag_max)))
+ax1 = AxisGeom(fig[1, 1], title = "Step: $stepStart",limits = (min_p[1], max_p[1], min_p[2], max_p[2], min_p[3], max_p[3]))
+hp1 = meshplot!(ax1, Fb, VT[stepStart];strokewidth = 2, color = UT_mag[stepStart], transparency = false,colormap = Reverse(:Spectral), colorrange = (0.0, maximum(ut_mag_max)))
 Colorbar(fig[1, 2], hp1.plots[1], label = "Displacement magnitude [mm]")
+ax3 = Axis(fig[1, 3], title = "Step: $stepStart", aspect = AxisAspect(1), xlabel = "circumferential stretch  λ_θ", ylabel = "pressure  p")
+lines!(ax3, stretch, press, color = :black, linewidth = 1.6)
+hp3 = scatter!(ax3, [Point2f(stretch[stepStart], press[stepStart])]; markersize = 15, color = :red)
+
 hSlider = Slider(fig[2, :], range = incRange, startvalue = stepStart, linewidth = 30)
+
 on(hSlider.value) do stepIndex
     i = stepIndex + 1
-    hp1[1] = GeometryBasics.Mesh(VT[i], F)
+    hp1[1]    = GeometryBasics.Mesh(VT[i], Fb)
     hp1.color = UT_mag[i]
+    hp3[1]    = [Point2f(stretch[i], press[i])]
     ax1.title = "Step: $stepIndex"
+    ax3.title = "Step: $stepIndex"
 end
+
 slidercontrol(hSlider, ax1)
 screen = display(GLMakie.Screen(), fig)
+
