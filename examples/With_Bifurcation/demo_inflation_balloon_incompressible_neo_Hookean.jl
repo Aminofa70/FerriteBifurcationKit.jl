@@ -232,8 +232,6 @@ for cell in CellIterator(dh)
     w0[celldofs(cell)[dof_range(dh, :p)]] .= -μ_mod
 end
 
-
-prob = BifurcationProblem(Fres, w0, par, (@optic _.pressure); J = Jac)
 prob = BifurcationProblem(Fres, w0, par, (@optic _.pressure); J = Jac)
 
 optnewton = NewtonPar(tol = 1e-4, max_iterations = 100, verbose = true, linsolver = DefaultLS())
@@ -258,7 +256,6 @@ br = continuation(prob, PALC(), optcont;
     normC = norminf, verbosity = 2,
     finalise_solution = (z, tau, step, contResult; k...) -> stretch_of(z.u) < λ_stop)
 
-# br = continuation(prob, PALC(), optcont; normC = norminf, verbosity = 2)
 
 nsteps = length(br.sol) 
 nd = ndofs(dh)
